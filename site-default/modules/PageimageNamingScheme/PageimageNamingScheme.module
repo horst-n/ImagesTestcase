@@ -1,0 +1,257 @@
+<?php
+
+/**
+ * ProcessWire module that extends the naming scheme for image filenames
+ *
+ *
+ * ProcessWire 2.x
+ * Copyright (C) 2010 by Ryan Cramer
+ * Licensed under GNU/GPL v2, see LICENSE.TXT
+ *
+ * http://www.processwire.com
+ *
+**/
+
+
+/*******************************************************************************
+  *  $Source: /WEB/pw4/htdocs/site/modules/PageimageNamingScheme/PageimageNamingScheme.module,v $
+  *  $Id: PageimageNamingScheme.module,v 1.3.2.2 2014/05/13 18:08:52 horst Exp $
+  ******************************************************************************
+**/
+
+class PageimageNamingScheme extends WireData implements Module, ConfigurableModule {
+
+    /**
+     * getModuleInfo is a module required by all modules to tell ProcessWire about them
+     *
+     * @return array
+     *
+     */
+    public static function getModuleInfo() {
+        return array(
+            'title'    => 'Pageimage Naming Scheme',
+            'version'  => '0.0.4',
+            'summary'  => 'A module that extends the naming scheme of image filenames and thus allowing much more variations.',
+            'href'     => 'http://images.pw.nogajski.de/new-naming-convention/',
+            'singular' => false,
+            'autoload' => true
+            );
+    }
+
+
+    /**
+     * Default settings used by this module
+     *
+     * @return array
+     */
+    static public function getDefaultData() {
+        return array(
+            'do_only_test_run' => '1'
+            );
+    }
+
+
+    /**
+     * Populate default settings
+     *
+     */
+    public function __construct() {
+        foreach(self::getDefaultData() as $key => $value) {
+            $this->$key = $value;
+        }
+    }
+
+
+    /**
+     * Initialize the module and setup hooks
+     *
+     */
+    public function init() {
+        $this->pages->addHookBefore('Pageimage::size', $this, 'size');
+        $this->pages->addHookBefore('Pageimage::isVariation', $this, 'isVariation');
+    }
+
+
+    public function __destruct() {
+    }
+
+
+
+    /**
+     * Build a form allowing configuration of this Module
+     *
+     */
+    static public function getModuleConfigInputfields(array $data) {
+        $data = array_merge(self::getDefaultData(), $data);
+        require_once(dirname(__FILE__) . '/PageimageNamingSchemeConfig.php');
+        $c = new PageimageNamingSchemeConfig();
+        return $c->getConfig($data);
+    }
+
+
+    /**
+     * Return a Pageimage object sized/cropped to the specified dimensions.
+     *
+     * @param int $width
+     * @param int $height
+     * @param array|string|int $options Array of options to override default behavior (quality=90, upscaling=true, cropping=center).
+     *    Or you may specify a string|bool with with 'cropping' value if you don't need to combine with other options.
+     *    Or you may specify an integer with 'quality' value if you don't need to combine with other options.
+     *    Or you may specify a boolean with 'upscaling' value if you don't need to combine with other options.
+     * @return Pageimage
+     */
+    public function size($event) {
+
+        $width = $event->arguments[0];
+        $height = $event->arguments[1];
+        $options = $event->arguments[2];
+        $pageimage = $event->object;
+
+        if(!is_array($options)) {
+            if(is_string($options)) {
+                // optionally allow a string to be specified with crop direction, for shorter syntax
+                if(strpos($options, ',') !== false) $options = explode(',', $options); // 30,40
+                $options = array('cropping' => $options);
+            } else if(is_int($options)) {
+                // optionally allow an integer to be specified with quality, for shorter syntax
+                $options = array('quality' => $options);
+            } else if(is_bool($options)) {
+                // optionally allow a boolean to be specified with upscaling toggle on/off
+                $options = array('upscaling' => $options);
+            }
+        }
+
+        $defaultOptions = array(
+            'upscaling' => true,
+            'cropping' => true,
+            'quality' => 90,
+            'sharpening' => 'soft'
+            );
+
+        $configOptions = wire('config')->imageSizerOptions;
+        if(!is_array($configOptions)) $configOptions = array();
+        $options = array_merge($defaultOptions, $configOptions, $options);
+
+        $width = (int) $width;
+        $height = (int) $height;
+        $crop = ImageSizer::croppingValueStr($options['cropping']);
+        if(is_bool($options['cropping'])) $crop = $options['cropping'] ? 'c' : '';
+        $upscale = $options['upscaling'] ? '' : 'nu';  // default is upscaling, so we reflect only the none default value
+        $quality = intval($options['quality']) >= 0 && intval($options['quality']) <= 100 ? 'q' . intval($options['quality']) : '';
+        $sharpen = ImageSizer::sharpeningValueStr($options['sharpening'], true);
+        $customAppendix = isset($options['appendix']) ? preg_replace('/[^a-z0-9]/', '', strtolower($options['appendix'])) : '';
+        $customAppendix = ''==$customAppendix ? '' : '-' . substr($customAppendix, 0, 10);
+
+
+        $basenameNew = $basenameCore = basename($pageimage->basename, "." . $pageimage->ext);
+        $basenameNew .= '.' . $width . 'x' . $height . $sharpen . $quality . $crop . $upscale . $customAppendix . "." . $pageimage->ext;
+        $basenameCore .= '.' . $width . 'x' . $height . $crop . "." . $pageimage->ext;
+        $filenameNew = $pageimage->pagefiles->path . $basenameNew;
+        $filenameCore = $pageimage->pagefiles->path . $basenameCore;
+
+        $forcenew = isset($options['forcenew']) && true===$options['forcenew'] ? true : false;
+        if($forcenew || is_file($filenameNew)) {
+            $filename = $filenameNew; // we use the new naming scheme
+            if(file_exists($filenameCore)) @unlink($filenameCore);  // remove old files when switching to new naming scheme
+        }
+        elseif(!$forcenew && !is_file($filenameNew) && is_file($filenameCore)) {
+            $filename = $filenameCore; // we use the core naming scheme
+        }
+        else {
+            $filename = $filenameNew;
+        }
+
+        if(!is_file($filename) || $forcenew) {
+            if(copy($pageimage->filename(), $filename)) {
+                try {
+                    $sizer = new ImageSizer($filename);
+                    $sizer->setOptions($options);
+                    $result = $sizer->resize($width, $height);
+                } catch(Exception $e) {
+                    wire('log')->error($e->getMessage());
+                    $this->error($e->getMessage());
+                }
+                if(true!==$result) {
+                    // if error isn't logged in ImageSizer we log it here
+                    if(!in_array($result, array(1,2))) wire('log')->error("Unknown error with ImageSizer and \n$filename");
+                    // create a wellsized blank error image for output
+                    ImageSizer::errorImage($width, $height, $filename);
+                }
+                if($this->config->chmodFile) chmod($filename, octdec($this->config->chmodFile));
+            } else {
+                wire('log')->error("Cannot copy file for ImageSizer! (from: $pageimage->filename) (to: $filename)");
+                // what's to do now?
+            }
+        }
+
+        $pageimage2 = clone $pageimage;
+        $pageimage2->setFilename($filename);
+        $pageimage2->setOriginal($pageimage);
+
+        $event->return = $pageimage2;
+        $event->replace = true;
+        return $event->return;
+    }
+
+
+    /**
+     * Given a filename, return array of info if this is a variation for this instance's file, false if not
+     *
+     * Returned array includes the following indexes:
+     * - original: Original basename
+     * - width: Specified width
+     * - height: Specified height
+     * - crop: Cropping info string or blank if none
+     *
+     * @param string $basename Filename to check
+     * @return bool|array Returns false if not a variation or array of it is
+     *
+     */
+    public function isVariation($event) {
+        $variationName = basename($event->arguments[0]);
+        $pageimage = $event->object;                                           // get the pageimage
+        $originalName = basename($pageimage->basename, "." . $pageimage->ext); // excludes extension
+
+        // if originalName is already a variation filename, remove the variation info from it.
+        // reduce to original name, i.e. all info after (and including) a period
+        if(strpos($originalName, '.') && preg_match('/^([^.]+)\.\d+x\d+/', $originalName, $matches)) {
+            $originalName = $matches[1];
+        }
+
+        $re = '/^' .
+            $originalName . '\.' .          // myfile.
+            '(\d+)x(\d+)' .                 // 50x50
+            '(s[0-3])?' .                   // s0 - s3    (s0 = none - s1 = soft - s2 = medium - s3 = strong)
+            '(q\d+)?' .                     // q0 - q100  (q = quality 0 - 100)
+            '(c|[pd]\d+x\d+|[a-z]{1,2})?' . // c or nw or p30x40 or d30x40  (cropping direction)
+            '(nu)?' .                       // nu  = No Upscaling, default is upscaling, so we reflect only the none default value
+            '(-[a-z0-9]{1,10})?' .          // optional custom filename appendix
+            '\.' . $pageimage->ext .        // .jpg
+            '$/';
+
+        // if regex does not match, return false
+        if(!preg_match($re, $variationName, $matches)) {
+            $event->return = false;
+            $event->replace = true;
+            return $event->return;
+        }
+
+        // this is a variation, return array of info
+        $info = array(
+            'original' => $originalName . '.' . $pageimage->ext,
+            'width' => $pageimage->width,
+            'height' => $pageimage->height,
+//            'width' => $matches[1],
+//            'height' => $matches[2],
+            'crop' => (isset($matches[5]) ? $matches[5] : '')
+            );
+
+        $event->return = $info;
+        $event->replace = true;
+        return $event->return;
+    }
+
+
+
+}
+
